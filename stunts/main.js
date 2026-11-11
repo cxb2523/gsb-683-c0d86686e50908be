@@ -137,6 +137,7 @@ const PHONE = matchMedia('(pointer: coarse)').matches && !matchMedia('(any-hover
 const LITE = /[?&]lite\b/.test(location.search);
 const view = HIRES ? new HiresView(glCanvas, mem, pal, scene, StuntsCode.DSEG, StuntsCode.SYM, MODERN ? { world, bg, phone: PHONE, lite: LITE } : {}) : null;
 const NOHUD = /[?&]nohud/.test(location.search);
+const NOSEG = /[?&]noseg\b/.test(location.search);   // (?noseg: leave the segment time and its gap to the record off the race HUD; everything else stays)
 const DASHM = ((/[?&]dash=(\w+)/.exec(location.search) || [])[1] || 'curve');   // (the widescreen dashboard: curve, the default; ?dash=flat the old flat colours)
 // (?dash=curve: the dashboard carried out to the sides bending down: each column further out drawn lower, on a curve that
 // takes it off the bottom of the screen; above it the 3D view. Its pixels: the car's plain column (DASH_COLS), as tex)
@@ -289,7 +290,11 @@ function fit() {
 // the way modern racing games put them. The worker leaves the game's clock out and sends the numbers
 // (hires-capture.js, opts.hud). A font: character offsets (words from 0x16); glyphs of 8 rows of bits, each
 // with its width in a byte first, or all of the width in the header (word 8) and no such byte.
-const hud = { def: null, led: null, d: null, at: 0, drawn: null };
+// seg: the page's own segment timer. The game's race clock (state+320) reads 0 on the line and is reset to 0 by every
+// restart (R, "Re-Start Driving", a new race from the menus), so the segment is marked again when the clock jumps back,
+// and while a replay plays (game_replay_mode set) the clock is only watched, never measured: opening a replay or the
+// pause panel pauses the segment, and driving on again carries on from where it stopped (as the race clock does)
+const hud = { def: null, led: null, d: null, at: 0, drawn: null, seg: { start: null, last: null } };
 function hudFont() { return hud.def; }   // (for qol.js, which has a hud of its own)
 function hudText(c, f, str, x, y, u, align, alpha, gap = 0, rgb = '255,255,255', shadow = true) {
   const fixed = f[0x10] | f[0x11] << 8;
@@ -324,6 +329,19 @@ function drawHud(t, race, shown) {
   const live = !!(race && hud.def && view && t - (view.lastFrame || 0) < 300);
   if (live) hud.menuAt = 0;
   const on = live && !mem[D + Sy.dashb_toggle] && !mem[D + Sy.game_replay_mode];
+  // the segment timer, watched every live frame even while the HUD itself is hidden (dashboard up, replay panel open).
+  // A new run begins when the race clock (state+320, the same 16-bit word the race time uses) jumps backwards: back
+  // near 0 for an R restart or a race started from the menus, or to an earlier frame when driving is taken up again
+  // from a wound-back replay/pause. (Like the ghost run and the race-time read, the word is taken as-is, so a run past
+  // its 16-bit wrap is out of scope.) While a replay plays the clock is not measured, so the segment never advances there
+  if (live) {
+    const g = mem[D + Sy.state + 320] | mem[D + Sy.state + 321] << 8;
+    if (!mem[D + Sy.game_replay_mode]) {
+      const S_ = hud.seg;
+      if (S_.start == null || g < S_.last && (g < 3 || S_.last - g >= 3)) S_.start = g;   // (a restart, or "Continue Driving" out of the replay panel)
+      S_.last = g;
+    }
+  }
   if (!live) {
     // outside a race: the look's key only while the HD picture is on screen (car select, the track menu's overview, a
     // paused race), where pressing it changes what is seen; the version on every menu, in OG mode too (issue 35)
@@ -357,11 +375,21 @@ function drawHud(t, race, shown) {
     if (hf && hf.length >= 364) for (let i = 0; i < 7; i++) { const f = hf[i * 52 + 0x32] | hf[i * 52 + 0x33] << 8; if (f && f < bestF) bestF = f; }
   }
   const bs = bestF === 0xFFFF ? null : bestF / 20, best = bs == null ? '-:--.--' : Math.floor(bs / 60) + ':' + (bs % 60 < 10 ? '0' : '') + (bs % 60).toFixed(2);
+  // the page's segment: from the frame the current run began on to the clock's frame now, in the game's own frames per
+  // second, formatted exactly as the race time above; and its gap to the record (segment minus record, signed, 0.01 s)
+  let segText = '', diffText = '';
+  if (!NOSEG && hud.seg.start != null) {
+    const segFrames = Math.max(0, d.frame - hud.seg.start), segSecs = segFrames / d.fps;
+    const sm = Math.floor(segSecs / 60), sss = segSecs - sm * 60;
+    segText = sm + ':' + (sss < 10 ? '0' : '') + sss.toFixed(2);
+    if (bs == null) diffText = '--.--';
+    else { const gap = segSecs - bs; diffText = (gap < 0 ? '-' : '+') + Math.abs(gap).toFixed(2); }
+  }
   // the game's own "Wrong Way" (state+0x45D = 3, set whenever you drive against the track) is drawn by the game only in the
   // in-car view; in the others the page shows it, flashing
   const wrong = mem[D + Sy.state + 0x45D] === 3 && d.cam !== 0 && (t % 800) < 500;
   const rewound = window.qolRewind ? qolRewind.secs : 0;   // (seconds rewound with Q in this race, qol.js: the race marked)
-  const time = mm + ':' + (ss < 10 ? '0' : '') + ss.toFixed(2), key = time + '|' + wrong + '|' + OG_MODE + '|' + view.giOn + '|' + d.mph + '|' + d.cam + '|' + hc.width + '|' + track + '|' + gear + '|' + best + '|' + (view.ghostAvail ? view.ghostOn : 'x') + '|' + rewound;
+  const time = mm + ':' + (ss < 10 ? '0' : '') + ss.toFixed(2), key = time + '|' + wrong + '|' + OG_MODE + '|' + view.giOn + '|' + d.mph + '|' + d.cam + '|' + hc.width + '|' + track + '|' + gear + '|' + best + '|' + (view.ghostAvail ? view.ghostOn : 'x') + '|' + rewound + '|' + segText + '|' + diffText;
   if (hud.drawn === key) return; hud.drawn = key;
   // (u: one pixel of the font for the labels; the numbers larger. All in proportion to the picture's height, in
   // between whole pixels too: the text shrinks with a smaller window, down to the font's own size)
@@ -385,6 +413,19 @@ function drawHud(t, race, shown) {
   hudText(c, hud.def, 'RECORD ' + best, m, base - gl, small, 'left', 0.75);   // (the track's record: its high score table, whoever set it)
   if (showGhost) { const w = hudText(c, hud.def, '(G) GHOST', m, base2, small, 'left', 0.75); hudText(c, hud.def, view.ghostOn ? 'ON' : 'OFF', m + w + 12 * small, base2, small, 'left', 1, 0, '255,247,33'); }
   if (wrong) hudText(c, hud.def, 'WRONG WAY', hc.width / 2, H * 0.3, u * 2.4, 'center', 1);
+  // top right, under the track's name: the page's segment time and the signed gap to the record. Right-aligned like the
+  // track name, each piece laid out from the right edge; this corner is otherwise empty, so the line never meets the
+  // speed, gear, the left settings or the bottom clocks, and every offset scales with the window's height
+  if (segText) {
+    // (the small labels and the large numbers share a text top, the way MPH and the speed do: hudText's y is the glyph
+    // baseline, 8 rows tall at the given size, so a small label's baseline sits that much below a large number's)
+    const top = m + 19 * small, rx = hc.width - m;
+    let x = rx;
+    x -= hudText(c, hud.def, diffText, x, top + 8 * tu, tu, 'right', 1);
+    x -= 6 * u + hudText(c, hud.def, 'DIFF', x, top + 8 * small, small, 'right', 0.75);
+    x -= 10 * u + hudText(c, hud.def, segText, x, top + 8 * tu, tu, 'right', 1);
+    hudText(c, hud.def, 'SEG', x - 6 * u, top + 8 * small, small, 'right', 0.75);
+  }
   // top right: the track, as large as the settings on the left and level with their first line
   if (track) hudText(c, hud.def, track, hc.width - m, m + 8 * small, small, 'right', 1);
   // bottom right: the speed, large, its unit beside it, the gear under
